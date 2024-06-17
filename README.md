@@ -19,7 +19,7 @@ Henceforth, we propose a methodology that leverages foundation models to generat
 
 ## **Model Implementation**
 
-The file `NetFoundModels.py` contains the class `netFoundDecoderModel.py`, which is essentially the implementation of our encoder-decoder model in PyTorch. 
+The file `NetFoundModels.py` contains the class `netFoundDecoderModel`, which is essentially the implementation of our encoder-decoder model in PyTorch. 
 
 ### **Evaluation Command**
 
