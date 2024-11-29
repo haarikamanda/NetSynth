@@ -12,19 +12,15 @@ class NetfoundConfig(PretrainedConfig):
         vocab_size=65539,
         hidden_size=768,
         max_bursts=12,
-        #max_bursts=11,
-        max_burst_length=108 + 1,
-        #max_burst_length=144 + 1,
+        max_burst_length=228,
         model_max_length=1296 + 12,
-        #model_max_length=1728 + 11,
-        num_hidden_layers=12,
-        num_attention_heads=12,
+        num_hidden_layers=6, #changed to 6 from 12
+        num_attention_heads=6, #changed to 6 from 12
         intermediate_size=3072,
         hidden_act="gelu",
         hidden_dropout_prob=0.1,
         attention_probs_dropout_prob=0.1,
-        max_position_embeddings=108 + 1,
-        #max_position_embeddings=144 + 1,
+        max_position_embeddings=228,
         type_vocab_size=2,
         initializer_range=0.02,
         layer_norm_eps=1e-12,
@@ -35,8 +31,12 @@ class NetfoundConfig(PretrainedConfig):
         classifier_dropout=None,
         metaFeatures=4,
         roformer=False,
-        no_meta = False,
+        no_meta = True,
         flat = False,
+        no_mlm=False,
+        no_swapped_bursts = True,
+        rep_output_path = None,
+        subflow_bursts = 3,
         **kwargs
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -69,4 +69,9 @@ class NetfoundConfig(PretrainedConfig):
         self.flat = flat
         self.limit_bursts = False
         self.rotary_value = False
+        self.subflow_len=-1
+        self.no_mlm = no_mlm
+        self.no_swapped_bursts = no_swapped_bursts
+        self.rep_output_path = rep_output_path
+        self.subflow_bursts = subflow_bursts
 

@@ -278,21 +278,24 @@ class NetFoundRobertaEmbeddings(RobertaEmbeddings, NetFoundEmbeddingsWithMeta):
         embeddings = self.word_embeddings(input_ids)
         if self.position_embedding_type == "absolute":
             position_embeddings = self.position_embeddings(position_ids)
+            if embeddings.shape[1]!=228:
+                pdb.set_trace()
             embeddings += position_embeddings
-        embeddings = self.addMetaEmbeddings(embeddings, direction, iats, bytes, pkt_count, protocol)
+        # embeddings = self.addMetaEmbeddings(embeddings, direction, iats, bytes, pkt_count, protocol)
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
 
     @staticmethod
     def create_position_ids_from_input_ids(input_ids, padding_idx, position_ids):
-        mask = input_ids.ne(padding_idx).int()
-        position_ids = (
-            position_ids.repeat(
-                input_ids.shape[0], input_ids.shape[1] // position_ids.shape[1]
-            )
-            * mask
-        )
+        # pdb.set_trace()
+        # mask = input_ids.ne(padding_idx).int()
+        # position_ids = (
+        #     position_ids.repeat(
+        #         input_ids.shape[0], input_ids.shape[1] // position_ids.shape[1]
+        #     )
+        #     * mask
+        # )
         return position_ids
 
 class NetFoundRoformerEmbeddings(RoFormerEmbeddings, NetFoundEmbeddingsWithMeta):
@@ -375,7 +378,7 @@ class NetFoundLayer(nn.Module):
 
         # replace burst representative tokens
         outputs[:, :: self.max_burst_length] = flow_outputs[0]
-
+        # print("**********************************************")
         return outputs, burst_outputs, flow_outputs
 
 
@@ -526,7 +529,7 @@ class NetFoundBase(NetFoundPretrainedModel):
 
         if not return_dict:
             return (final_output) + encoder_outputs[1:]
-
+        # print("*********************************************************************************************************************************")
         return BaseModelOutputWithFlowAttentions(
             last_hidden_state=final_output,
             hidden_states=encoder_outputs.hidden_states,
@@ -592,7 +595,8 @@ class NetFoundLanguageModelling(NetFoundPretrainedModel):
         self.swappedClassifierHiddenLayer = nn.Linear(config.hidden_size, 2)
         self.linearMetadataPred = nn.Linear(config.hidden_size, 3)
         self.dirPred = nn.Linear(config.hidden_size, 2)
-
+        # self.aggregate = MeanPooling()
+        self.chunk_size=228
         # The LM head weights require special treatment only when they are tied with the word embeddings
         self.update_keys_to_ignore(config, ["lm_head.decoder.weight"])
 
@@ -664,54 +668,84 @@ class NetFoundLanguageModelling(NetFoundPretrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-        pdb.set_trace()
 
         #creating ground truths tensors before masking
-        direction_orig = direction.clone().to(torch.long)
-        iat_orig = iats.clone()/1000 #adjusting as values are higher.
-        bytes_orig = bytes.clone()/1000 #adjusting as values are higher.
-        pktCount_orig = pkt_count.clone()
+        # direction_orig = direction.clone().to(torch.long)
+        # iat_orig = iats.clone()/1000 #adjusting as values are higher.
+        # bytes_orig = bytes.clone()/1000 #adjusting as values are higher.
+        # pktCount_orig = pkt_count.clone()
 
-        direction = self.maskMeta(burstMetasToBeMasked, direction)
-        iats = self.maskMeta(burstMetasToBeMasked, iats)
-        bytes = self.maskMeta(burstMetasToBeMasked, bytes)
-        pktCount = self.maskMeta(burstMetasToBeMasked, pkt_count)
-        outputs = self.base_transformer(
-            input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            direction=direction,
-            iats=iats,
-            bytes=bytes,
-            pkt_count=pktCount,
-            protocol=protocol,
-        )
-        sequence_output = outputs[0]
-        prediction_scores = self.lm_head(sequence_output)
-        pooled_output = poolingByAttention(
-            self.attentivePooling, sequence_output, self.config.max_burst_length
-        )
-        burstReps = sequence_output.clone()
-        burstMetasToBeMasked = burstMetasToBeMasked
-        # metaPreds = self.linearMetadataPred(burstReps)
-        # metaPreds = burstMetasToBeMasked.to(torch.float32)*metaPreds
-        # metaLabels = burstMetasToBeMasked.to(torch.float32)*torch.hstack([iat_orig, bytes_orig, pktCount_orig])
-        # #direction will be a classification task, -100 is used to not compute loss in pytorch. so all the masked
-        # direction_orig[direction.to(torch.long)!=0]=-100
-        # directn_logits = torch.softmax(self.dirPred(burstReps), -1)
+        # direction = self.maskMeta(burstMetasToBeMasked, direction)
+        # iats = self.maskMeta(burstMetasToBeMasked, iats)
+        # bytes = self.maskMeta(burstMetasToBeMasked, bytes)
+        # pktCount = self.maskMeta(burstMetasToBeMasked, pkt_count)
+        batch_size = input_ids.size(0)
+        seq_len = input_ids.size(1)
+        num_chunks = (seq_len + self.chunk_size - 1) // self.chunk_size
+        all_representations=[]
+        for i in range(batch_size):
+            data_point_representations = []
 
+            # Loop through each chunk for the current data point
+            for chunk_idx in range(int((seq_len)//self.chunk_size)+1):
+                start_idx = chunk_idx * self.chunk_size
+                end_idx = min((chunk_idx + 1) * self.chunk_size, seq_len)
 
+                # Extract chunk
+                chunk_input_ids = input_ids[i, start_idx:end_idx].unsqueeze(0)
+                chunk_attention_mask = (
+                    attention_mask[i, start_idx:end_idx].unsqueeze(0)
+                )
+                # pdb.set_trace()
+                # Pass through base transformer
+                padding_length = self.chunk_size - chunk_input_ids.shape[1]
+                if padding_length > 0:
+                    # Pad chunk_input_ids with `padding_idx` (commonly 0)
+                    chunk_input_ids = nn.functional.pad(chunk_input_ids, (0, padding_length), value=0)
+
+                    # Pad chunk_attention_mask with 0 (no attention to padding tokens)
+                    chunk_attention_mask = nn.functional.pad(chunk_attention_mask, (0, padding_length), value=0)
+
+                    # Now, both tensors have shape: [batch_size, max_length]
+                    # print(f"Padded chunk_input_ids shape: {{chunk_attention_mask.shape}}")
+
+                outputs = self.base_transformer(
+                    chunk_input_ids,
+                    attention_mask=chunk_attention_mask,
+                    position_ids=position_ids,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                )
+
+                data_point_representations.append(outputs[0])  # Last hidden state
+                del chunk_input_ids, chunk_attention_mask, outputs
+                # torch.cuda.empty_cache()
+            # pdb.set_trace()
+            # concatenated_rep=torch.stack(data_point_representations, dim=2)
+            # aggregated_representation = torch.mean(torch.stack(data_point_representations, dim=0), dim=0)
+            # all_representations.append(aggregated_representation)
+            combined_representation = torch.cat(data_point_representations, dim=1)
+            del data_point_representations
+            # pdb.set_trace()
+            all_representations.append(combined_representation)
+            del combined_representation
+        # pdb.set_trace()
+        final_representation = torch.stack(all_representations, dim=0)
+        del all_representations
+        torch.cuda.empty_cache()
+        final_representation = final_representation[:,:, :labels.shape[1], :]
+        # final_representation = torch.stack(all_representations, dim=0)
+        
+        # pdb.set_trace()
+        prediction_scores = self.lm_head(final_representation)   
+        # pdb.set_trace()
         masked_lm_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()
             loss_fct2 = L1Loss()
             if not self.no_mlm:
-                masked_lm_loss = loss_fct(
-                    prediction_scores.view(-1, self.config.vocab_size), labels.view(-1)
-                )
+                masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), labels.view(-1))
                 totalLoss = masked_lm_loss
             # if not self.no_swapped_bursts:
             #     swappedClassificationLoss = loss_fct(swappedLogits, swappedLabels)
@@ -739,17 +773,27 @@ class NetFoundLanguageModelling(NetFoundPretrainedModel):
         #     attentions=outputs.attentions,
         # )
 
-
+        # pdb.set_trace()
         if not return_dict:
             output = (prediction_scores,) + outputs[2:]
             return ((totalLoss,) + output) if masked_lm_loss is not None else output
 
+        # return MaskedLMOutput(
+        #     loss=totalLoss,
+        #     logits=(prediction_scores, protocol),
+        #     hidden_states=outputs.hidden_states,
+        #     attentions=outputs.attentions,
+        # )
+        del final_representation
+        torch.cuda.empty_cache()
+        # pdb.set_trace()
         return MaskedLMOutput(
-            loss=totalLoss,
-            logits=(prediction_scores, protocol),
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+                loss=totalLoss,
+                logits=prediction_scores,
+                # logits=(prediction_scores, protocol),
+                hidden_states=None,
+                attentions=None,
+            )
 
 
 def poolingByConcat(sequence_output, max_burst_length, hidden_size, max_bursts):
@@ -796,360 +840,3 @@ class AttentivePooling(nn.Module):
         return torch.sum(attention_weights_normalized.unsqueeze(-1) * inputs, 1)
 
 
-class NetfoundFinetuningModel(NetFoundPretrainedModel):
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        self.config = config
-        self.model_max_length = config.model_max_length
-        self.max_burst_length = self.config.max_burst_length
-        self.base_transformer = NetFoundBase(config)
-        self.attentivePooling = AttentivePooling(config)
-        classifier_dropout = (
-            config.classifier_dropout
-            if config.classifier_dropout is not None
-            else config.hidden_dropout_prob
-        )
-        self.dropout = nn.Dropout(classifier_dropout)
-        self.hiddenLayer = nn.Linear(config.hidden_size, config.hidden_size)
-        self.hiddenLayer2 = nn.Linear(config.hidden_size, config.hidden_size)
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self.attentivePooling = AttentivePooling(config=config)
-        self.relu = nn.ReLU()
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def poolingByAttention(self, sequence_output, max_burst_length):
-        burstReps = sequence_output[:, ::max_burst_length, :].clone()
-        return self.attentivePooling(burstReps)
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        direction=None,
-        iats=None,
-        bytes=None,
-        pkt_count=None,
-        protocol=None,
-        stats=None,
-        flow_duration = None
-    ):
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
-            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
-            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
-        """
-        if labels is None:
-            labels = flow_duration / 1000.0
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        outputs = self.base_transformer(
-            input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            direction=direction,
-            iats=iats,
-            bytes=bytes,
-            pkt_count=pkt_count,
-            protocol=protocol,
-        )
-
-        sequence_output = outputs[0]
-        pooled_output = poolingByAttention(
-            self.attentivePooling, sequence_output, self.config.max_burst_length
-        )
-        pooled_output = self.hiddenLayer2(self.hiddenLayer(pooled_output))
-        if stats is not None:
-            logits = self.classifier(torch.concatenate([pooled_output, stats], dim=-1))
-        else:
-            logits = self.classifier(torch.concatenate([pooled_output], dim=-1))
-
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (
-                    labels.dtype == torch.long or labels.dtype == torch.int
-                ):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = L1Loss()
-                if self.num_labels == 1:
-                    logits = self.relu(logits)
-                    loss = loss_fct(logits.squeeze(), (labels.squeeze().to(torch.float32)))
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels)
-
-        if not return_dict:
-            output = (logits,) + outputs[2:]
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-        )
-
-
-class NetfoundNoPTM(NetFoundPretrainedModel):
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-
-    def __init__(self, config):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        self.config = config
-        self.model_max_length = config.model_max_length
-        self.max_burst_length = self.config.max_burst_length
-        classifier_dropout = (
-            config.classifier_dropout
-            if config.classifier_dropout is not None
-            else config.hidden_dropout_prob
-        )
-        self.dropout = nn.Dropout(classifier_dropout)
-        self.hiddenLayer = nn.Linear(1595, config.hidden_size * 2)
-        self.hiddenLayer2 = nn.Linear(config.hidden_size * 2, config.hidden_size)
-
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self.relu = nn.ReLU()
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def poolingByAttention(self, sequence_output, max_burst_length):
-        burstReps = sequence_output[:, ::max_burst_length, :].clone()
-        return self.attentivePooling(burstReps)
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        direction=None,
-        iat=None,
-        bytes=None,
-        pktCount=None,
-        stats=None,
-    ):
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
-            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
-            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
-        """
-
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-        input = torch.concatenate(
-            [
-                input_ids,
-                torch.zeros((input_ids.shape[0], 1595 - input_ids.shape[1])).to(
-                    input_ids.device
-                ),
-            ],
-            dim=-1,
-        )
-
-        pooled_output = self.hiddenLayer2(self.hiddenLayer(input))
-        logits = self.classifier(torch.concatenate([pooled_output], dim=-1))
-
-        loss = None
-        if labels is not None:
-            if self.config.problem_type is None:
-                if self.num_labels == 1:
-                    self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (
-                    labels.dtype == torch.long or labels.dtype == torch.int
-                ):
-                    self.config.problem_type = "single_label_classification"
-                else:
-                    self.config.problem_type = "multi_label_classification"
-
-            if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
-                if self.num_labels == 1:
-                    logits = self.relu(logits)
-                    loss = loss_fct(logits.squeeze(), (labels.squeeze()))
-                else:
-                    loss = loss_fct(logits, labels)
-            elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits.view(-1, self.num_labels), labels)
-
-        if not return_dict:
-            output = (logits,) + pooled_output[2:]
-            return ((loss,) + output) if loss is not None else output
-
-        return SequenceClassifierOutput(
-            loss=loss,
-            logits=logits,
-        )
-
-# TODO(maybe-hello-world): not public
-class NetFoundSubFlowFinetuning(NetFoundPretrainedModel):
-
-    _keys_to_ignore_on_load_missing = [r"position_ids"]
-    _keys_to_ignore_on_load_unexpected = [r"pooler"]
-
-    def __init__(self, config):
-        super().__init__(config)
-
-        self.base_transformer = NetFoundBase(config)
-        self.lm_head = LMHead(config)
-        self.no_mlm = config.no_mlm
-        self.rep_output_path = config.rep_output_path
-        self.no_swapped_bursts = config.no_swapped_bursts
-        self.attentivePooling = AttentivePooling(config)
-        self.subFlowPooling = AttentivePooling(config)
-        self.portClassifierHiddenLayer = nn.Linear(config.hidden_size, 65536)
-        self.swappedClassifierHiddenLayer = nn.Linear(config.hidden_size, 2)
-        self.nextSubFlowPkts = nn.Linear(config.hidden_size, 1)
-        self.subflow_bursts = config.subflow_bursts
-        self.max_burst_length = config.max_burst_length
-
-        # The LM head weights require special treatment only when they are tied with the word embeddings
-        self.update_keys_to_ignore(config, ["lm_head.decoder.weight"])
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
-        """Tie or clone module weights depending of whether we are using TorchScript or not"""
-        if self.config.torchscript:
-            output_embeddings.weight = nn.Parameter(input_embeddings.weight.clone())
-        else:
-            output_embeddings.weight = input_embeddings.weight
-
-        if getattr(output_embeddings, "bias", None) is not None:
-            output_embeddings.bias.data = nn.functional.pad(
-                output_embeddings.bias.data,
-                (
-                    0,
-                    output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0],
-                ),
-                "constant",
-                0,
-            )
-        if hasattr(output_embeddings, "out_features") and hasattr(
-            input_embeddings, "num_embeddings"
-        ):
-            output_embeddings.out_features = input_embeddings.num_embeddings
-
-    def get_output_embeddings(self):
-        return self.lm_head.decoder
-
-    def set_output_embeddings(self, new_embeddings):
-        self.lm_head.decoder = new_embeddings
-
-    def get_input_embeddings(self):
-        return self.base_transformer.embeddings.word_embeddings
-
-    def set_input_embeddings(self, value):
-        self.base_transformer.embeddings.word_embeddings = value
-
-    def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        position_ids=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        direction=None,
-        iat=None,
-        bytes=None,
-        pktCount=None,
-        ports=None,
-        swappedLabels=None,
-        proto=None,
-        fileName=None
-    ):
-        #output_attentions=True
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-
-        lenOfFlow = input_ids.shape[1]
-        numBursts = lenOfFlow//self.max_burst_length
-        outputs = [self.base_transformer(
-            input_ids[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            attention_mask=attention_mask[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            position_ids=position_ids,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            direction=direction[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            iat=iat[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            bytes=bytes[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            pktCount=pktCount[:,burst*self.max_burst_length:(burst+self.subflow_bursts)*self.max_burst_length],
-            proto=proto,
-        ) for burst in range(numBursts-2*self.subflow_bursts)]
-        totalLoss = None
-        for i in range(len(outputs)-1):
-            sequence_outputs = [outputs[id][0] for id in range(i+1) ]
-            #breakpoint()
-            pooled_outputs = [poolingByAttention(
-                self.attentivePooling, sequence_outputs[id], self.config.max_burst_length
-            ) for id in range(i+1)]
-            flowRep = poolingByAttention(
-                self.subFlowPooling, torch.stack(pooled_outputs, dim = 1), self.config.max_burst_length
-            )
-            if self.rep_output_path is not None:
-                with open(self.rep_output_path+str(flowRep.device), "a") as f:
-                    for i in range(len(fileName)):
-                        f.write(f"{fileName[i]},{','.join([str(flt) for flt in flowRep.detach()[i].tolist()])},{labels[i].detach()}\n")
-            nextSubFlowPkts = self.nextSubFlowPkts(flowRep)
-
-            masked_lm_loss = None
-            if labels is not None:
-                loss_fct = L1Loss()
-                if totalLoss is None:
-                    totalLoss = loss_fct(nextSubFlowPkts.flatten(), labels[:,i])
-                else:
-                    totalLoss += loss_fct(nextSubFlowPkts.flatten(), labels[:,i])
-            if not return_dict:
-                logger.debug(return_dict)
-        # ls,ops = MaskedLMOutput(
-        #     loss=totalLoss,
-        #     logits=prediction_scores,
-        #     hidden_states=outputs.hidden_states,
-        #     attentions=outputs.attentions,
-        # )
-
-
-        if not return_dict:
-            output = (totalLoss,) + outputs[2:]
-            return ((nextSubFlowPkts,) + output) if masked_lm_loss is not None else output
-
-        return MaskedLMOutput(
-            loss=totalLoss/len(outputs) if totalLoss is not None else torch.tensor(0.0, requires_grad=True).to(self.base_transformer.device),
-            logits=None,
-            hidden_states=None,
-            attentions=None,
-        )

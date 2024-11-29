@@ -16,7 +16,7 @@ from multiprocessing import Pool
 
 # from autogluon.tabular import TabularDataset, TabularPredictor
 from scipy import stats
-from src.pre_process import labeling
+from src.pre_process.finetune import labeling
 
 inputDir = "/data/UCSBFinetuning_with_payload/"
 dirLs = os.listdir(inputDir)
